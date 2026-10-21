@@ -1,0 +1,7 @@
+/* Structure only: layers and positioning. The look (fonts, colours, boxes,
+   motion) comes from STYLE through studio.js, or from a preset's CSS. */
+html,body{margin:0;width:var(--w);height:var(--h);overflow:hidden;background:transparent}
+body{position:relative;color:var(--ink);-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
+#caps,#calls,#chipwrap{position:absolute;left:0;top:0}
+#calls>*{position:absolute;left:0;top:0}
+#lines{position:absolute;left:0;top:0;overflow:visible}

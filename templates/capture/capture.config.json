@@ -1,0 +1,24 @@
+{
+  "url": "https://example.com/",
+  "viewport": [1920, 1080],
+  "profile": "cache/live-profile",
+  "waitFor": "body",
+  "settleMs": 2500,
+  "hideDuringCapture": ["#cookie-banner", ".toast", ".intercom-launcher"],
+  "pages": {
+    "home": {
+      "path": "/",
+      "panels": {
+        "panel-stats": { "sel": "#stats" },
+        "nav": { "sel": "nav", "hide": [".nav-btn"] },
+        "btn-a": { "sel": "nav .nav-btn:nth-child(1)" },
+        "btn-b": { "sel": "nav .nav-btn:nth-child(2)" },
+        "btn-c": { "sel": "nav .nav-btn:nth-child(3)" }
+      }
+    }
+  },
+  "clips": [
+    { "slug": "clip-a", "path": "/", "seconds": 5, "what": "Home, slow scroll", "steps": [{ "scroll": 600, "secs": 5 }] },
+    { "slug": "clip-b", "path": "/pricing", "seconds": 4, "what": "Pricing, hover the main plan", "steps": [{ "hover": ".plan.featured" }, { "wait": 3500 }] }
+  ]
+}

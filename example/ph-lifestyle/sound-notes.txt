@@ -1,0 +1,42 @@
+PH Lifestyle explainer: sound notes (written by src/sound.py)
+
+sound.wav  48 kHz stereo 24-bit, 1440000 samples = 30.000 s = 900 frames
+  integrated -14.0 LUFS (BS.1770-4, own meter), true peak -1.20 dBTP (4x oversampled), 0 clipped samples
+  voice alone (as mixed) -14.0 LUFS
+music.wav  the bed without the voice and without ducking, same gain staging
+  integrated -19.5 LUFS, true peak -1.20 dBTP
+
+Voice: af_heart, resampled to 48 kHz, high-pass 90 Hz, +2.5 dB at 3 kHz, -1.5 dB at 250 Hz,
+  levelled per line, 2.5:1 compression, centred. Bed ducked -9 dB under it (+3 dB more at 1-5 kHz),
+  ~40 ms down, ~250 ms back up, 150 ms hold, 30 ms lookahead. The fade touches only the bed.
+
+Voice over the ducked bed, per line (where the voice speaks; dB):
+  line      start    end   voice     bed  ratio speech-band  bed pk vs voice pk
+  hook       0.23   3.70   -16.2   -31.5   15.3        25.3                -7.8
+  alive      3.77   6.23   -15.9   -32.5   16.6        32.3               -18.5
+  eat        6.57   7.07   -16.4   -29.3   12.9        14.7               -18.0
+  sleep      7.17   7.77   -15.7   -29.3   13.6        17.4               -12.7
+  party      7.77   8.37   -15.7   -29.4   13.7        18.4               -12.2
+  drink      8.37   8.93   -16.0   -28.8   12.8        18.3               -12.2
+  danfo      9.13  10.40   -16.3   -27.4   11.1        17.8               -11.7
+  job       11.97  12.83   -16.4   -26.9   10.5        20.9               -11.3
+  paid      12.90  13.60   -15.9   -29.1   13.3        16.4               -15.1
+  spend     13.80  14.67   -16.0   -30.2   14.2        19.9               -12.6
+  car       14.97  15.57   -16.3   -31.9   15.6        26.9               -19.3
+  house     15.57  16.20   -17.2   -32.4   15.2        27.6               -20.3
+  clothes   16.20  16.73   -16.0   -30.0   14.0        26.0               -14.4
+  ride      16.77  17.93   -16.4   -32.4   16.0        26.1               -17.2
+  real      18.37  20.30   -16.3   -33.4   17.1        27.8               -18.7
+  chat      20.57  21.13   -16.3   -34.4   18.1        28.6               -20.3
+  spray     21.13  21.93   -15.7   -30.6   14.9        22.9               -14.3
+  love      22.00  22.83   -16.3   -32.9   16.6        26.5               -18.4
+  hide      22.97  24.90   -16.0   -31.8   15.8        24.0               -12.9
+  end       25.67  29.57   -16.0   -32.6   16.6        23.2               -17.1
+
+  worst broadband ratio 10.5 dB (job), worst speech-band ratio 14.7 dB (eat)
+
+Camera whip whoosh: 20.93-21.30 s
+
+Lead plucks (8), only between lines, at (s): 10.5 10.8 11.1 11.2 11.7 18.1 25.2 29.7
+
+Bed level through the fade (100 ms steps from the fade event): -37 -35 -38 -44 -51 -40 -44 -54 -75

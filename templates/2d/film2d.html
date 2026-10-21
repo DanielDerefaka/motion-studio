@@ -1,0 +1,305 @@
+<!doctype html>
+<!-- A 2D-only film: a starting point, not a look. Opaque frames.
+       node src/render2d.mjs src/film2d.html [--format=9x16] [--test=60,150] [--jobs=4] [--style=look.json]
+     Everything visual is STYLE (via studio.js); everything timed is timeline.json:
+       RECTS   the product's panels (UI px), drawn here as plain stand-in panels
+               on a 2D camera; replace them with the real UI (DOM, canvas, SVG,
+               WebGL, video frames: anything that draws from f alone)
+       EVENTS  knock (panels arrive), press {target} (cursor + press), money
+               {amount} (counter), hud-off (panels leave), endcard (STYLE.cut to
+               END_LINE / END_URL), fade (to STYLE.bg by the last frame)
+       CAPTIONS through captions.js
+     Assumed timeline fields, read with defaults: CURRENCY ('') and STYLE.panel
+     ({ fill, radius, line }). -->
+<html><head><meta charset="utf-8">
+<meta name="motion-studio" content="opaque no-anchors">
+<title>film2d</title>
+<style>
+/* structure only */
+html,body{margin:0;width:var(--w);height:var(--h);overflow:hidden;background:var(--bg)}
+body{position:relative;color:var(--ink);-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
+#stage,#ui,#end,#fx,#cutfx,#bg{position:absolute;left:0;top:0;width:var(--w);height:var(--h)}
+#world{position:absolute;left:0;top:0;transform-origin:0 0}
+.panel{position:absolute;box-sizing:border-box;overflow:hidden}
+#cursor{position:absolute;left:0;top:0}
+#count{position:absolute;left:0;top:0;white-space:nowrap}
+#end{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+#fx,#cutfx{pointer-events:none}
+</style>
+</head><body>
+<svg width="0" height="0" style="position:absolute"><defs><filter id="look" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB"></filter></defs></svg>
+<div id="stage">
+  <div id="bg"></div>
+  <div id="ui"><div id="world"></div><div id="count"></div><svg id="cursor" overflow="visible"><path/></svg></div>
+  <div id="end"><div id="endline"></div><div id="endurl"></div></div>
+  <div id="caps"></div>
+</div>
+<div id="cutfx"></div>
+<div id="fx"><canvas id="grain"></canvas><div id="vig"></div></div>
+<script type="module">
+import { clamp, lerp, tween, keys, counter, split, applyPose, camera2d, project, grainTile, grainShift } from './motion.js';
+import { boot, stack, exitPose } from './studio.js';
+import { captions } from './captions.js';
+
+const S = await boot();
+const { T, w: W, h: H } = S;
+const st = S.style;
+const E = st.enter;
+const X = st.exit;
+const ev = (k) => S.time.events(k);
+const at = (k, d) => ev(k)[0]?.f ?? d;
+const $ = (id) => document.getElementById(id);
+const PANEL = { fill: null, radius: 0.012, line: null, ...(st.panel || {}) };
+const ink = (a) => `color-mix(in srgb, ${st.ink} ${a}%, transparent)`;
+
+// --- the UI on a 2D camera ------------------------------------------------------
+const RECTS = T.RECTS || {};
+const world = $('world');
+const panels = Object.entries(RECTS).map(([id, r], i) => {
+  const n = document.createElement('div');
+  n.className = 'panel';
+  Object.assign(n.style, {
+    left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px`,
+    background: PANEL.fill || ink(8), borderRadius: `${S.u(PANEL.radius)}px`,
+    border: PANEL.line ? `1px solid ${PANEL.line}` : 'none',
+    // the stand-in label is sized to the panel (it scales with the camera)
+    ...S.type('body', { line: 1.1 }), fontSize: `${Math.min(r.w, r.h) * 0.16}px`, padding: `${Math.min(r.w, r.h) * 0.1}px`,
+    color: ink(55), whiteSpace: 'nowrap',
+  });
+  n.textContent = id;                       // stand-in: replace with the real panel
+  world.append(n);
+  return { id, r, i, el: n };
+});
+// Frame the panels inside the safe area above the captions.
+const capTop = S.u(st.caption.y) - 2.2 * S.u(st.type[st.caption.type]?.size ?? st.type.body.size) * (st.type.body.line || 1.2);
+const xs = panels.flatMap((p) => [p.r.x, p.r.x + p.r.w]);
+const ys = panels.flatMap((p) => [p.r.y, p.r.y + p.r.h]);
+const box = panels.length ? { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) } : { x: 0, y: 0, w: W, h: H };
+const room = { w: S.safe.r - S.safe.l, h: Math.min(S.safe.b, capTop) - S.safe.t };
+const OVER = { x: box.x + box.w / 2, y: box.y + box.h / 2, zoom: Math.min(room.w / box.w, room.h / box.h) };
+const SCREEN_C = [W / 2, S.safe.t + room.h / 2];       // where the camera's look point sits
+// Keep the panels' bounding box inside the frame (above the captions) at zoom z.
+const M = S.u(st.safe) / 2;   // a push may use half the safe margin, never the frame edge
+function clampCam([x, y], z) {
+  const hx = (W / 2 - M) / z;
+  const top = (SCREEN_C[1] - M) / z;
+  const bot = (Math.min(S.safe.b, capTop) - SCREEN_C[1]) / z;
+  const cx = box.w <= 2 * hx ? clamp(x, box.x + box.w - hx, box.x + hx) : OVER.x;
+  const cy = box.h <= top + bot ? clamp(y, box.y + box.h - bot, box.y + top) : OVER.y;
+  return [cx, cy, z];
+}
+// Camera keys: the overview, a push towards each pressed panel, back out at hud-off.
+const MOVE = Math.max(6, (E.frames || 8) * 2);
+const presses = ev('press').filter((e) => RECTS[e.target]);
+const camKeys = [[1, [OVER.x, OVER.y, OVER.zoom]]];
+for (const p of presses) {
+  const r = RECTS[p.target];
+  // a gentle push towards the pressed panel that never pushes a panel out of frame
+  const pt = clampCam([lerp(OVER.x, r.x + r.w / 2, 0.33), lerp(OVER.y, r.y + r.h / 2, 0.33)], Math.min(OVER.zoom * 1.15, (W - 2 * M) / box.w, (Math.min(S.safe.b, capTop) - M) / box.h));
+  camKeys.push([Math.max(camKeys[camKeys.length - 1][0] + 1, p.f - MOVE), camKeys[camKeys.length - 1][1]], [p.f, pt]);
+}
+const hudOff = at('hud-off', T.FRAMES + 1);
+if (presses.length) camKeys.push([hudOff, camKeys[camKeys.length - 1][1]], [hudOff + MOVE, [OVER.x, OVER.y, OVER.zoom]]);
+const cam = (f) => {
+  const [x, y, zoom] = keys(f, camKeys, S.moveEase);
+  return { x, y, zoom };
+};
+const toScreen = (pt, c) => {
+  const p = project(pt, c, W, H);
+  return [p[0], p[1] + (SCREEN_C[1] - H / 2)];
+};
+
+// --- cursor: arrives at each target 3 frames before its press ---------------------
+const cursor = $('cursor');
+const cs0 = S.u(0.03);
+cursor.firstChild.setAttribute('d', `M0,0 L0,${cs0} L${cs0 * 0.28},${cs0 * 0.74} L${cs0 * 0.62},${cs0 * 0.74} Z`);
+cursor.firstChild.setAttribute('fill', st.ink);
+cursor.firstChild.setAttribute('stroke', st.bg);
+cursor.firstChild.setAttribute('stroke-width', String(Math.max(1, S.u(0.002))));
+const legs = presses.map((p, i) => {
+  const r = RECTS[p.target];
+  return { f0: p.f - 3 - MOVE, f1: p.f - 3, to: [r.x + r.w * 0.55, r.y + r.h * 0.6], from: i ? null : [OVER.x + box.w * 0.3, OVER.y + box.h * 0.45], p };
+});
+legs.forEach((l, i) => { if (!l.from) l.from = legs[i - 1].to; });
+function cursorAt(f) {
+  if (!legs.length || f < legs[0].f0 || f >= hudOff) return null;
+  let pos = legs[0].from;
+  for (const l of legs) {
+    if (f < l.f0) break;
+    const k = S.moveEase(clamp((f - l.f0) / (l.f1 - l.f0)));
+    // a slight arc, so the path reads as a hand
+    const mx = lerp(l.from[0], l.to[0], k);
+    const my = lerp(l.from[1], l.to[1], k) - Math.sin(Math.PI * k) * Math.hypot(l.to[0] - l.from[0], l.to[1] - l.from[1]) * 0.12;
+    pos = [mx, my];
+  }
+  return pos;
+}
+
+// --- money counter -----------------------------------------------------------------
+const money = ev('money')[0];
+const countEl = $('count');
+Object.assign(countEl.style, S.type('display'), { color: st.accent });
+const CUR = T.CURRENCY ?? '';
+
+// --- end card ------------------------------------------------------------------------
+const endF = at('endcard', T.FRAMES + 1);
+const endEl = $('end');
+const lineEl = $('endline');
+const urlEl = $('endurl');
+Object.assign(lineEl.style, S.type('display'), { maxWidth: `${Math.min(S.w - 2 * S.u(st.safe), S.u(1.2))}px`, textWrap: 'balance' });
+Object.assign(urlEl.style, S.type('body'), { color: st.accent, marginTop: `${S.u(0.03)}px` });
+const by = E.kind === 'type' ? 'char' : E.by;
+const endSplit = split(lineEl, T.END_LINE || '', { chars: by === 'char' });
+endSplit.words.filter((x) => x.accent).forEach((x) => { x.el.style.color = st.accent; });
+urlEl.textContent = T.END_URL || '';
+const endUnits = (() => {
+  if (by === 'char') return endSplit.chars.map((el, i) => ({ el, d: i * (E.stagger || 1) }));
+  if (by === 'word') return endSplit.words.map((x, i) => ({ el: x.el, d: i * (E.stagger || 0) }));
+  if (by === 'line') return endSplit.lines().flatMap((ln, i) => ln.map((x) => ({ el: x.el, d: i * (E.stagger || 0) })));
+  return endSplit.words.map((x) => ({ el: x.el, d: 0 }));
+})();
+for (const u of endUnits) { u.w = u.el.offsetWidth; u.h = u.el.offsetHeight; }
+const urlUnit = { el: urlEl, w: urlEl.offsetWidth, h: urlEl.offsetHeight };
+const endLast = Math.max(0, ...endUnits.map((u) => u.d));
+
+// --- cut (STYLE.cut) between the UI and the end card -----------------------------------
+const CUT = { kind: st.cut.kind || 'hard', n: Math.max(0, st.cut.frames || 0) };
+const cutfx = $('cutfx');
+function cutAt(f) {
+  // returns { ui: pose of the outgoing scene, end: pose of the incoming, flash }
+  const n = CUT.n;
+  const k = n ? clamp((f - endF + n / 2) / n) : f >= endF ? 1 : 0;
+  const none = { transform: 'none', opacity: 1, filter: 'none', clip: 'none', hidden: false };
+  const off = { ...none, hidden: true };
+  const e = S.ease(st.move.ease)(k);
+  switch (n ? CUT.kind : 'hard') {
+    case 'dissolve': return { ui: { ...none, opacity: 1 - e, hidden: k >= 1 }, end: { ...none, opacity: e, hidden: k <= 0 }, flash: 0 };
+    case 'flash': return { ui: k < 0.5 ? none : off, end: k < 0.5 ? off : none, flash: 1 - Math.abs(k - 0.5) * 2 };
+    case 'whip': {
+      const blur = Math.sin(Math.PI * k) * S.u(0.03);
+      return {
+        ui: { ...none, transform: `translateX(${(-e * W).toFixed(1)}px)`, filter: `blur(${blur.toFixed(1)}px)`, hidden: k >= 1 },
+        end: { ...none, transform: `translateX(${((1 - e) * W).toFixed(1)}px)`, filter: `blur(${blur.toFixed(1)}px)`, hidden: k <= 0 },
+        flash: 0,
+      };
+    }
+    default: return { ui: f < endF ? none : off, end: f < endF ? off : none, flash: 0 };   // hard, match
+  }
+}
+
+// --- texture (STYLE.texture) ------------------------------------------------------------
+const TX = st.texture;
+const grain = $('grain');
+const GS = 256;
+if (TX.grain > 0) {
+  const tile = grainTile(GS, 'film2d');
+  grain.width = W + GS;
+  grain.height = H + GS;
+  const g = grain.getContext('2d');
+  g.fillStyle = g.createPattern(tile, 'repeat');
+  g.fillRect(0, 0, W + GS, H + GS);
+  Object.assign(grain.style, { position: 'absolute', left: '0', top: '0', opacity: String(TX.grain), mixBlendMode: 'overlay' });
+} else grain.remove();
+const vig = $('vig');
+if (TX.vignette > 0) Object.assign(vig.style, { position: 'absolute', inset: '0', background: `radial-gradient(ellipse at 50% 50%, transparent 45%, rgba(0,0,0,${TX.vignette}) 100%)` });
+// blur (softness, fraction of H), chroma (channel split, fraction of H), bloom
+// (0..1 glow strength) as one SVG filter on the whole stage.
+{
+  const fl = document.getElementById('look');
+  const parts = [];
+  let src = 'SourceGraphic';
+  if (TX.blur > 0) { parts.push(`<feGaussianBlur in="${src}" stdDeviation="${S.u(TX.blur).toFixed(2)}" result="soft"/>`); src = 'soft'; }
+  if (TX.chroma > 0) {
+    const d = S.u(TX.chroma).toFixed(2);
+    parts.push(`<feColorMatrix in="${src}" type="matrix" values="1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="r"/>`,
+      `<feOffset in="r" dx="${d}" result="r2"/>`,
+      `<feColorMatrix in="${src}" type="matrix" values="0 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0" result="gb"/>`,
+      `<feOffset in="gb" dx="-${d}" result="gb2"/>`,
+      `<feBlend in="r2" in2="gb2" mode="screen" result="ch"/>`);
+    src = 'ch';
+  }
+  if (TX.bloom > 0) {
+    parts.push(`<feGaussianBlur in="${src}" stdDeviation="${S.u(0.012).toFixed(2)}" result="b"/>`,
+      `<feComponentTransfer in="b" result="b2"><feFuncR type="linear" slope="${TX.bloom}"/><feFuncG type="linear" slope="${TX.bloom}"/><feFuncB type="linear" slope="${TX.bloom}"/></feComponentTransfer>`,
+      `<feBlend in="${src}" in2="b2" mode="screen"/>`);
+  }
+  if (parts.length) { fl.innerHTML = parts.join(''); $('stage').style.filter = 'url(#look)'; }
+}
+// The background: STYLE.bg, with a soft glow of the first palette colour when there is one.
+$('bg').style.background = st.palette[0] ? `radial-gradient(ellipse at 50% 40%, color-mix(in srgb, ${st.palette[0]} 22%, transparent), transparent 70%), ${st.bg}` : st.bg;
+
+const drawCaptions = captions($('caps'), S);
+const fadeF = at('fade', T.FRAMES + 1);
+const knock = at('knock', 1);
+
+// --- the contract -------------------------------------------------------------------------
+window.renderFrame = (f) => {
+  const c = cam(f);
+  world.style.transform = `translate(0px,${SCREEN_C[1] - H / 2}px) ${camera2d(c, W, H)}`;
+  // panels arrive (STYLE.enter, staggered) and leave at hud-off (STYLE.exit)
+  for (const p of panels) {
+    const t = f - knock - p.i * (E.stagger || 0);
+    const k = t < 0 ? 0 : tween(t, E);
+    const kx = f >= hudOff ? tween(f - hudOff - p.i * (E.stagger || 0), X) : 0;
+    const ps = stack(S.enter(k, { w: p.r.w, h: p.r.h }, { by: 'block' }), S.exit(kx, { w: p.r.w, h: p.r.h }));
+    if (t < 0) ps.hidden = true;
+    applyPose(p.el, ps);
+    // press feedback: the pressed panel fills with the accent and settles back
+    const pr = presses.filter((e) => e.target === p.id && f >= e.f).pop();
+    const kp = pr ? clamp((f - pr.f) / Math.max(4, X.frames || 6)) : 1;
+    p.el.style.background = kp < 1 ? `color-mix(in srgb, ${st.accent} ${Math.round((1 - S.ease(X.ease)(kp)) * 100)}%, ${PANEL.fill || ink(8)})` : (PANEL.fill || ink(8));
+    p.el.style.transformOrigin = '50% 50%';
+    if (pr && f - pr.f < 4) p.el.style.transform += ` scale(${(1 - 0.04 * Math.sin((Math.PI * (f - pr.f + 1)) / 4)).toFixed(4)})`;
+  }
+  const cp = cursorAt(f);
+  if (cp) {
+    const [sx, sy] = toScreen(cp, c);
+    const near = presses.find((e) => f >= e.f - 1 && f < e.f + 3);
+    cursor.style.display = '';
+    cursor.style.transform = `translate(${sx.toFixed(1)}px,${sy.toFixed(1)}px) scale(${near ? 0.85 : 1})`;
+  } else cursor.style.display = 'none';
+  // money: counts up over the move time and holds until hud-off
+  if (money && f >= money.f && f < hudOff) {
+    const t = f - money.f;
+    countEl.textContent = counter(tween(t, { frames: MOVE, ease: st.move.ease }), 0, money.amount, { prefix: `+${CUR}` });
+    const r = RECTS[money.target || presses[presses.length - 1]?.target];
+    const [mx, my] = r ? toScreen([r.x + r.w / 2, r.y], c) : [W / 2, H * 0.3];
+    const cw = countEl.offsetWidth;
+    const chh = countEl.offsetHeight;
+    const x = clamp(mx - cw / 2, S.safe.l, S.safe.r - cw);
+    const y = clamp(my - chh - S.u(0.02), S.safe.t, H);
+    applyPose(countEl, stack(S.enter(tween(t, E), { w: cw, h: chh }, { by: 'block' }), S.exit(f >= hudOff - (X.frames || 6) ? tween(f - (hudOff - (X.frames || 6)), X) : 0, { w: cw, h: chh })), `translate(${x}px,${y}px)`);
+  } else countEl.style.visibility = 'hidden';
+  // end card: units arrive from endcard; the URL after the line
+  const te = f - endF;
+  for (const u of endUnits) {
+    const t = te - u.d - Math.round(CUT.n / 2);
+    const ps = S.enter(t < 0 ? 0 : tween(t, E), u);
+    if (t < 0) ps.hidden = true;
+    applyPose(u.el, ps);
+  }
+  {
+    const t = te - endLast - (E.frames || 8) - Math.round(CUT.n / 2);
+    const ps = S.enter(t < 0 ? 0 : tween(t, E), urlUnit, { by: 'block' });
+    if (t < 0) ps.hidden = true;
+    applyPose(urlEl, ps);
+  }
+  const cut = cutAt(f);
+  applyPose($('ui'), cut.ui);
+  applyPose(endEl, cut.end);
+  cutfx.style.background = st.ink;
+  cutfx.style.opacity = String(cut.flash);
+  drawCaptions(f);
+  // fade to STYLE.bg, landing on the last frame
+  const kf = f >= fadeF ? clamp((f - fadeF) / Math.max(1, T.FRAMES - fadeF)) : 0;
+  $('stage').style.opacity = String(1 - S.ease(X.ease)(kf));
+  if (TX.grain > 0) { const [gx, gy] = grainShift(f, GS, 'film2d'); grain.style.transform = `translate(${gx}px,${gy}px)`; }
+  return true;
+};
+window.renderReport = () => [
+  `look: enter ${E.kind} by ${E.by}, exit ${X.kind}, cut ${CUT.kind}/${CUT.n}f, texture ${Object.entries(TX).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(' ') || 'none'}${st.preset ? `, preset ${st.preset}` : ''}`,
+  `${panels.length} panels, ${presses.length} presses, camera zoom ${OVER.zoom.toFixed(2)} overview`,
+  ...drawCaptions.report(),
+];
+</script>
+</body></html>
